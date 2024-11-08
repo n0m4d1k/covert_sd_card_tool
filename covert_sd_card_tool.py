@@ -9,9 +9,12 @@ from datetime import datetime
 import platform
 import urllib.request
 import tarfile
+import time
+import json  # Import json for parsing lsblk output
 
 # Global variables
 DEBUG = False
+FAST_MODE = False
 TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
 LOG_FILE = f"covert_sd_setup_{TIMESTAMP}.log"
 CREATE_KALI = False
@@ -29,18 +32,28 @@ def run_command(command, shell=False, interactive=False):
         log(f"Running command: {command}")
     try:
         if interactive:
-            # Run the command without capturing output, allowing interaction
-            result = subprocess.run(command, shell=shell, check=True)
+            # For interactive commands, connect stdin, stdout, stderr to the terminal
+            result = subprocess.run(
+                command,
+                shell=shell,
+                check=True
+            )
         else:
-            # Run the command and capture output
-            result = subprocess.run(command, shell=shell, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            # For non-interactive commands, capture output
+            result = subprocess.run(
+                command,
+                shell=shell,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
+            )
             if result.stdout:
                 log(result.stdout.strip())
+            if result.stderr:
+                log(result.stderr.strip())
     except subprocess.CalledProcessError as e:
-        if interactive:
-            log(f"Command failed: {e}")
-        else:
-            log(f"Command failed: {e}\nOutput: {e.output}")
+        log(f"Command failed: {e}\nOutput: {e.stdout}\nError: {e.stderr}")
         sys.exit(1)
 
 def check_dependencies():
@@ -120,12 +133,21 @@ def install_veracrypt():
 
 def list_drives():
     log("Available drives:")
-    result = subprocess.run(["lsblk", "-d", "-o", "NAME,SIZE,TYPE"], capture_output=True, text=True)
-    for line in result.stdout.strip().splitlines():
-        if "disk" in line:
-            name_size = line.strip().split()
-            drive = f"/dev/{name_size[0]} {name_size[1]}"
+    result = subprocess.run(["lsblk", "-J", "-o", "NAME,SIZE,TYPE"], capture_output=True, text=True)
+    lsblk_output = json.loads(result.stdout)
+    for device in lsblk_output['blockdevices']:
+        if device['type'] == 'disk':
+            name = device['name']
+            size = device['size']
+            drive = f"/dev/{name} {size}"
             log(drive)
+
+def get_partition_name(drive, partition_number):
+    if 'nvme' in drive or 'mmcblk' in drive:
+        # NVMe and MMC devices use 'p' before the partition number
+        return f"{drive}p{partition_number}"
+    else:
+        return f"{drive}{partition_number}"
 
 def prepare_drive(drive):
     # Unmount all mounted partitions on the drive
@@ -248,6 +270,7 @@ def fix_partition_table():
         log("Created documents partition.")
 
     run_command(f"sudo partprobe {DRIVE}", shell=True)
+    time.sleep(2)  # Wait for partitions to be recognized
 
     # Proceed to set up the persistence partition
     setup_kali_partition()
@@ -259,33 +282,46 @@ def fix_partition_table():
 def setup_kali_partition():
     global DRIVE
     # The persistence partition is partition 2
-    PERSIST_PART = f"{DRIVE}2"
+    PERSIST_PART = get_partition_name(DRIVE, 2)
 
     # Wipe existing signatures on the partition
     run_command(["sudo", "wipefs", "--all", PERSIST_PART])
 
-    # Encrypt and format persistence partition with stronger encryption
     log("Configuring encrypted persistence partition...")
 
-    # Specify stronger encryption options
-    luks_format_cmd = (
-        f"sudo cryptsetup luksFormat "
-        f"--cipher aes-xts-plain64 "
-        f"--key-size 512 "
-        f"--hash sha512 "
-        f"--iter-time 5000 "
-        f"'{PERSIST_PART}'"
-    )
-    run_command(luks_format_cmd, shell=True, interactive=True)
+    if FAST_MODE:
+        # Use faster, less secure encryption options
+        luks_format_cmd = (
+            f"sudo cryptsetup luksFormat '{PERSIST_PART}' "
+            f"--type luks1 "
+            f"--cipher aes-cbc-essiv:sha256 "
+            f"--key-size 256 "
+            f"--hash sha256 "
+            f"--iter-time 1000"
+        )
+        mkfs_cmd = f"sudo mkfs.ext3 -L persistence /dev/mapper/kali_USB"
+    else:
+        # Use stronger encryption options
+        luks_format_cmd = (
+            f"sudo cryptsetup luksFormat '{PERSIST_PART}' "
+            f"--cipher aes-xts-plain64 "
+            f"--key-size 512 "
+            f"--hash sha512 "
+            f"--iter-time 5000"
+        )
+        mkfs_cmd = f"sudo mkfs.ext4 -L persistence /dev/mapper/kali_USB"
 
+    # Perform encryption
+    run_command(luks_format_cmd, shell=True, interactive=True)
+    time.sleep(2)  # Wait for the system to recognize the encrypted partition
     run_command(f"sudo cryptsetup luksOpen '{PERSIST_PART}' kali_USB", shell=True, interactive=True)
-    run_command("sudo mkfs.ext4 -L persistence /dev/mapper/kali_USB", shell=True)
+    run_command(mkfs_cmd, shell=True)
 
     # Create persistence.conf
     run_command("sudo mkdir -p /mnt/kali_USB", shell=True)
     run_command("sudo mount /dev/mapper/kali_USB /mnt/kali_USB", shell=True)
     run_command('echo "/ union" | sudo tee /mnt/kali_USB/persistence.conf', shell=True)
-    run_command("sudo umount /dev/mapper/kali_USB", shell=True)
+    run_command("sudo umount /mnt/kali_USB", shell=True)
     run_command("sudo cryptsetup luksClose kali_USB", shell=True)
 
     log("Kali persistence setup complete.")
@@ -293,34 +329,49 @@ def setup_kali_partition():
 def setup_docs_partition():
     global DRIVE
     # The documents partition is partition 3
-    DOCS_PART = f"{DRIVE}3"
+    DOCS_PART = get_partition_name(DRIVE, 3)
 
     # Wipe existing signatures on the partition
     run_command(["sudo", "wipefs", "--all", DOCS_PART])
 
     log("Configuring VeraCrypt encryption for documents partition...")
 
-    # Specify stronger encryption options
-    veracrypt_create_cmd = (
-        f"veracrypt --text --create '{DOCS_PART}' "
-        f"--encryption AES-Twofish-Serpent "
-        f"--hash whirlpool "
-        f"--filesystem exfat "
-        f"--volume-type normal "
-        f"--size=100%"
-    )
+    if FAST_MODE:
+        # Use faster, less secure encryption options
+        veracrypt_create_cmd = (
+            f"veracrypt --text --create '{DOCS_PART}' "
+            f"--encryption AES "
+            f"--hash SHA-256 "
+            f"--filesystem exfat "
+            f"--volume-type normal "
+            f"--quick "
+            # Removed '--size' parameter
+        )
+    else:
+        # Use stronger encryption options
+        veracrypt_create_cmd = (
+            f"veracrypt --text --create '{DOCS_PART}' "
+            f"--encryption AES-Twofish-Serpent "
+            f"--hash whirlpool "
+            f"--filesystem exfat "
+            f"--volume-type normal "
+            # Removed '--size' parameter
+        )
+
+    # Create VeraCrypt volume
     run_command(veracrypt_create_cmd, shell=True, interactive=True)
 
     log("Encrypted documents partition setup complete.")
 
 def main():
-    global DEBUG, CREATE_KALI, CREATE_DOCS, KALI_ISO, DRIVE
+    global DEBUG, FAST_MODE, CREATE_KALI, CREATE_DOCS, KALI_ISO, DRIVE
 
     parser = argparse.ArgumentParser(description="Covert SD Card Tool")
     parser.add_argument("-a", "--all", action="store_true", help="Set up both Kali bootable USB and documents partition")
     parser.add_argument("-k", "--kali", action="store_true", help="Create Kali bootable USB and persistence partition")
     parser.add_argument("-d", "--docs", action="store_true", help="Create encrypted documents partition")
     parser.add_argument("-i", "--iso", help="Path to the Kali ISO file")
+    parser.add_argument("--fast", action="store_true", help="Enable fast setup with less secure encryption")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
 
     args = parser.parse_args()
@@ -332,6 +383,10 @@ def main():
     DEBUG = args.debug
     if DEBUG:
         log("Debug mode enabled")
+
+    FAST_MODE = args.fast
+    if FAST_MODE:
+        log("Fast mode enabled: Using less secure encryption for quicker setup.")
 
     CREATE_KALI = args.all or args.kali
     CREATE_DOCS = args.all or args.docs
