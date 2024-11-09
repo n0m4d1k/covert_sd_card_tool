@@ -229,6 +229,62 @@ def fix_partition_table():
         setup_docs_partition()
     setup_unencrypted_partition()
 
+def fix_partition_table_tails():
+    log("Fixing partition table to reclaim remaining space...")
+
+    run_command(f"sudo parted -a optimal -s {DRIVE} rm 2", shell=True)
+    log("Deleted partition 2.")
+
+    result = subprocess.run(["sudo", "parted", "-s", DRIVE, "unit", "MB", "print"], capture_output=True, text=True)
+    end_of_p1 = None
+    for line in result.stdout.strip().splitlines():
+        if line.strip().startswith("1"):
+            parts = line.strip().split()
+            end_of_p1 = parts[2]
+            break
+    if end_of_p1 is None:
+        log("Error: Could not find end of partition 1.")
+        sys.exit(1)
+
+    log(f"End of partition 1: {end_of_p1}")
+
+    result = subprocess.run(["lsblk", "-bn", "-o", "SIZE", DRIVE], capture_output=True, text=True)
+    sizes = result.stdout.strip().splitlines()
+    total_size_bytes = int(sizes[0].strip())
+    total_size_mb = total_size_bytes / (1024 * 1024)
+
+    start_docs_mb = float(end_of_p1.replace('MB', ''))
+    end_docs_mb = start_docs_mb + (size_docs_gb * 1024)
+
+    size_docs = input("Enter size for documents partition in GB (leave blank to use remaining space minus 1GB): ")
+    if size_docs:
+        try:
+            size_docs_gb = float(size_docs)
+            end_docs_mb = start_docs_mb + (size_docs_gb * 1024)
+            if end_docs_mb > total_size_mb - 1024:
+                log("Error: Documents partition size exceeds available space when reserving 1GB for unencrypted partition.")
+                sys.exit(1)
+        except ValueError:
+            log("Invalid size entered for documents partition. Exiting.")
+            sys.exit(1)
+    else:
+        end_docs_mb = total_size_mb - 1024
+
+    run_command(f"sudo parted -a optimal -s {DRIVE} mkpart primary {start_docs_mb}MB {end_docs_mb}MB", shell=True)
+    log("Created documents partition.")
+
+    start_unencrypted_mb = end_docs_mb
+    run_command(f"sudo parted -a optimal -s {DRIVE} mkpart primary {start_unencrypted_mb}MB 100%", shell=True)
+    log("Created unencrypted partition for scripts/instructions.")
+
+    run_command(f"sudo partprobe {DRIVE}", shell=True)
+    time.sleep(2)
+
+    setup_kali_partition()
+    if CREATE_DOCS:
+        setup_docs_partition()
+    setup_unencrypted_partition()
+
 def setup_kali_partition():
     global DRIVE
     PERSIST_PART = get_partition_name(DRIVE, 2)
