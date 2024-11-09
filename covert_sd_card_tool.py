@@ -50,7 +50,7 @@ def run_command(command, shell=False, interactive=False):
         sys.exit(1)
 
 def check_dependencies():
-    dependencies = ["parted", "cryptsetup", "lsblk", "dd", "sgdisk", "wipefs", "bc", "fdisk", "veracrypt", "lsof", "fuser", "mountpoint"]
+    dependencies = ["parted", "cryptsetup", "lsblk", "dd", "sgdisk", "wipefs", "bc", "fdisk", "veracrypt", "lsof", "fuser", "mountpoint", "udevadm"]
     missing = []
     for dep in dependencies:
         if not shutil.which(dep):
@@ -134,6 +134,9 @@ def setup_usb():
             run_command(["sudo", "dd", "if=/dev/zero", f"of={DRIVE}", "bs=1M", "count=10"])
             log(f"{DRIVE} wiped successfully.")
 
+    # Initialize variables to track if ISO has been written
+    iso_written = False
+
     if CREATE_KALI or CREATE_TAILS:
         global KALI_ISO, TAILS_ISO
         if CREATE_KALI:
@@ -154,16 +157,24 @@ def setup_usb():
         log(f"Writing ISO to {DRIVE}...")
         run_command(f"sudo dd if='{ISO_PATH}' of='{DRIVE}' bs=64M status=progress", shell=True, interactive=True)
         log(f"ISO written to {DRIVE} successfully.")
+        iso_written = True
 
+    # After writing ISO, set up partitions accordingly
+    if iso_written:
         if CREATE_KALI:
             fix_partition_table()
-        elif CREATE_TAILS:
+        if CREATE_TAILS:
             fix_partition_table_tails()
-    elif CREATE_DOCS:
+
+    # If documents partition is requested, set it up
+    if CREATE_DOCS and not (CREATE_KALI or CREATE_TAILS):
+        # If not setting up OS bootable USB, proceed directly
         fix_partition_table_docs_only()
-    else:
-        log("No valid setup option selected. Exiting.")
-        sys.exit(1)
+    elif CREATE_DOCS and (CREATE_KALI or CREATE_TAILS):
+        # If setting up OS bootable USB, documents partition is handled in fix_partition_table() or fix_partition_table_tails()
+        # Depending on the specific needs, you might want to call fix_partition_table_docs_only() here
+        # Let's call it to ensure documents partition is created
+        fix_partition_table_docs_only()
 
 def fix_partition_table_docs_only():
     log("Setting up partitions for documents only...")
@@ -176,7 +187,11 @@ def fix_partition_table_docs_only():
 
     # Get the total size of the drive in bytes
     result = subprocess.run(["lsblk", "-b", "-n", "-o", "SIZE", DRIVE], capture_output=True, text=True)
-    total_size_bytes = int(result.stdout.strip())
+    try:
+        total_size_bytes = int(result.stdout.strip())
+    except ValueError:
+        log("Error: Unable to determine drive size.")
+        sys.exit(1)
     total_size_mib = total_size_bytes / (1024 * 1024)  # Convert to MiB
 
     # Ask for document partition size
@@ -239,7 +254,11 @@ def fix_partition_table():
 
     # Get the total size of the drive in bytes
     result = subprocess.run(["lsblk", "-b", "-n", "-o", "SIZE", DRIVE], capture_output=True, text=True)
-    total_size_bytes = int(result.stdout.strip())
+    try:
+        total_size_bytes = int(result.stdout.strip())
+    except ValueError:
+        log("Error: Unable to determine drive size.")
+        sys.exit(1)
     total_size_mib = total_size_bytes / (1024 * 1024)  # Convert to MiB
 
     # Ask for persistence partition size
@@ -318,6 +337,11 @@ def fix_partition_table_tails():
 def setup_kali_partition():
     global DRIVE
     PERSIST_PART = get_partition_name(DRIVE, 2)
+
+    # Check if partition exists
+    if not os.path.exists(PERSIST_PART):
+        log(f"Error: Partition {PERSIST_PART} does not exist.")
+        sys.exit(1)
 
     run_command(["sudo", "wipefs", "--all", PERSIST_PART])
 

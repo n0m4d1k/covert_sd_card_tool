@@ -63,22 +63,26 @@ sudo ./covert_sd_card_tool.py [options]
 
 ### Examples
 
-- **Install Kali with Encrypted Persistence and Documents Partition:**
+- **Install Kali with Encrypted Persistence and Encrypted Documents Partition:**
 
   ```bash
   sudo ./covert_sd_card_tool.py -a -i /path/to/kali.iso
   ```
 
-- **Install Tails and Documents Partition:**
+- **Install Tails and Encrypted Documents Partition:**
 
   ```bash
   sudo ./covert_sd_card_tool.py -a -t -i /path/to/tails.iso
   ```
 
-- **Install Tails Without Documents Partition:**
+- **Install Tails Without Encrypted Documents Partition:**
 
   ```bash
   sudo ./covert_sd_card_tool.py -t -i /path/to/tails.iso
   ```
 
+- **Install Encrypted Documents Partition Only:**
 
+  ```bash
+  sudo ./covert_sd_card_tool.py -d
+  ```
