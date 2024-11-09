@@ -313,14 +313,8 @@ def setup_unencrypted_partition():
     run_command(f"sudo mount {UNENCRYPTED_PART} /mnt/unencrypted", shell=True)
 
     instructions = f"""
-To mount the encrypted partitions:
+To mount the encrypted documents partition:
 
-**Persistence Partition (Kali only):**
-1. Open a terminal.
-2. Run: sudo cryptsetup luksOpen {get_partition_name(DRIVE, 2)} kali_persistence
-3. Mount: sudo mount /dev/mapper/kali_persistence /mnt/kali_persistence
-
-**Documents Partition:**
 1. Open a terminal.
 2. Run: sudo veracrypt --text --mount {get_partition_name(DRIVE, 3)} /mnt/veracrypt_docs
 
@@ -330,6 +324,9 @@ You can use the provided script 'mount_encrypted_partitions.sh' to automate this
 Usage:
 sudo ./mount_encrypted_partitions.sh
 
+**Cleanup Script:**
+To unmount and lock the encrypted documents partition, run:
+sudo ./cleanup_encrypted_partitions.sh
 """
 
     # Write README.txt
@@ -339,34 +336,50 @@ sudo ./mount_encrypted_partitions.sh
     run_command("sudo rm /tmp/README.txt", shell=True)
     log("Created README.txt with mounting instructions.")
 
+    # Write mount script for documents partition
     mount_script = f"""#!/bin/bash
-# Script to mount encrypted partitions
+# Script to mount encrypted documents partition
 
-# Mount persistence partition (Kali only)
-if [ -b "{get_partition_name(DRIVE, 2)}" ]; then
-    echo "Opening and mounting encrypted persistence partition..."
-    sudo cryptsetup luksOpen {get_partition_name(DRIVE, 2)} kali_persistence
-    sudo mkdir -p /mnt/kali_persistence
-    sudo mount /dev/mapper/kali_persistence /mnt/kali_persistence
-    echo "Persistence partition mounted at /mnt/kali_persistence."
-fi
-
-# Mount documents partition
 if [ -b "{get_partition_name(DRIVE, 3)}" ]; then
     echo "Mounting VeraCrypt documents partition..."
     sudo mkdir -p /mnt/veracrypt_docs
     sudo veracrypt --text --mount {get_partition_name(DRIVE, 3)} /mnt/veracrypt_docs
     echo "Documents partition mounted at /mnt/veracrypt_docs."
+else
+    echo "Documents partition not found."
 fi
 """
 
-    # Write mount script
     with open("/tmp/mount_encrypted_partitions.sh", "w") as script_file:
         script_file.write(mount_script)
     run_command("sudo cp /tmp/mount_encrypted_partitions.sh /mnt/unencrypted/mount_encrypted_partitions.sh", shell=True)
     run_command("sudo chmod +x /mnt/unencrypted/mount_encrypted_partitions.sh", shell=True)
     run_command("sudo rm /tmp/mount_encrypted_partitions.sh", shell=True)
     log("Created mount_encrypted_partitions.sh script.")
+
+    # Write cleanup script for documents partition
+    cleanup_script = """#!/bin/bash
+# Script to unmount and lock encrypted documents partition
+
+echo "Unmounting and locking encrypted documents partition..."
+
+if mountpoint -q /mnt/veracrypt_docs; then
+    echo "Unmounting VeraCrypt documents partition..."
+    sudo veracrypt --text --dismount /mnt/veracrypt_docs
+    echo "VeraCrypt documents partition unmounted."
+else
+    echo "Documents partition is not mounted."
+fi
+
+echo "Cleanup complete. Encrypted documents partition is locked and unmounted."
+"""
+
+    with open("/tmp/cleanup_encrypted_partitions.sh", "w") as script_file:
+        script_file.write(cleanup_script)
+    run_command("sudo cp /tmp/cleanup_encrypted_partitions.sh /mnt/unencrypted/cleanup_encrypted_partitions.sh", shell=True)
+    run_command("sudo chmod +x /mnt/unencrypted/cleanup_encrypted_partitions.sh", shell=True)
+    run_command("sudo rm /tmp/cleanup_encrypted_partitions.sh", shell=True)
+    log("Created cleanup_encrypted_partitions.sh script.")
 
     run_command("sudo umount /mnt/unencrypted", shell=True)
     log("Unencrypted partition setup complete.")
