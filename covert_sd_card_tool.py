@@ -10,7 +10,7 @@ import platform
 import urllib.request
 import tarfile
 import time
-import json  # Import json for parsing lsblk output
+import json
 
 # Global variables
 DEBUG = False
@@ -19,7 +19,9 @@ TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
 LOG_FILE = f"covert_sd_setup_{TIMESTAMP}.log"
 CREATE_KALI = False
 CREATE_DOCS = False
+CREATE_TAILS = False
 KALI_ISO = ""
+TAILS_ISO = ""
 DRIVE = ""
 
 def log(message):
@@ -32,14 +34,8 @@ def run_command(command, shell=False, interactive=False):
         log(f"Running command: {command}")
     try:
         if interactive:
-            # For interactive commands, connect stdin, stdout, stderr to the terminal
-            result = subprocess.run(
-                command,
-                shell=shell,
-                check=True
-            )
+            subprocess.run(command, shell=shell, check=True)
         else:
-            # For non-interactive commands, capture output
             result = subprocess.run(
                 command,
                 shell=shell,
@@ -71,65 +67,6 @@ def check_dependencies():
         else:
             log("Cannot proceed without installing dependencies. Exiting.")
             sys.exit(1)
-    # Check for VeraCrypt separately
-    if not shutil.which("veracrypt"):
-        log("VeraCrypt is not installed. Attempting to install VeraCrypt...")
-        install_veracrypt()
-
-def install_veracrypt():
-    # Determine system architecture
-    arch = platform.machine()
-    if arch == "x86_64":
-        veracrypt_arch = "x64"
-    elif arch == "i386" or arch == "i686":
-        veracrypt_arch = "x86"
-    else:
-        log(f"Unsupported architecture: {arch}. Please install VeraCrypt manually.")
-        sys.exit(1)
-
-    # Set VeraCrypt version
-    veracrypt_version = "1.25.9"
-
-    # Construct download URL
-    download_url = f"https://launchpad.net/veracrypt/trunk/{veracrypt_version}/+download/veracrypt-{veracrypt_version}-setup-console-{veracrypt_arch}.tar.bz2"
-
-    # Download VeraCrypt installer
-    log(f"Downloading VeraCrypt {veracrypt_version} for {veracrypt_arch}...")
-    installer_filename = f"veracrypt-{veracrypt_version}-setup-console-{veracrypt_arch}.tar.bz2"
-    try:
-        urllib.request.urlretrieve(download_url, installer_filename)
-    except Exception as e:
-        log(f"Failed to download VeraCrypt: {e}")
-        sys.exit(1)
-
-    # Extract the installer
-    log("Extracting VeraCrypt installer...")
-    try:
-        with tarfile.open(installer_filename, 'r:bz2') as tar:
-            tar.extractall()
-    except Exception as e:
-        log(f"Failed to extract VeraCrypt installer: {e}")
-        sys.exit(1)
-
-    # Run the installer silently
-    installer_script = f"veracrypt-{veracrypt_version}-setup-console-{veracrypt_arch}"
-    if not os.path.exists(installer_script):
-        log(f"Installer script not found: {installer_script}")
-        sys.exit(1)
-
-    log("Installing VeraCrypt...")
-    try:
-        # Automate license acceptance and install VeraCrypt
-        run_command(f"echo -e 'yes\n' | sudo ./{installer_script} --accept-license", shell=True)
-    except Exception as e:
-        log(f"Failed to install VeraCrypt: {e}")
-        sys.exit(1)
-
-    # Clean up installer files
-    os.remove(installer_filename)
-    os.remove(installer_script)
-
-    log("VeraCrypt installed successfully.")
 
 def list_drives():
     log("Available drives:")
@@ -144,21 +81,19 @@ def list_drives():
 
 def get_partition_name(drive, partition_number):
     if 'nvme' in drive or 'mmcblk' in drive:
-        # NVMe and MMC devices use 'p' before the partition number
         return f"{drive}p{partition_number}"
     else:
         return f"{drive}{partition_number}"
 
 def prepare_drive(drive):
-    # Unmount all mounted partitions on the drive
     result = subprocess.run(["lsblk", "-lnp", drive], capture_output=True, text=True)
     for line in result.stdout.strip().splitlines():
         parts = line.strip().split()
         if len(parts) >= 7 and parts[6]:  # If mountpoint is not empty
             part = parts[0]
             log(f"Unmounting {part}...")
-            run_command(["sudo", "umount", part])
-    # Disable swap on any swap partitions on the drive
+            run_command(["sudo", "umount", "-l", part])
+
     with open("/proc/swaps") as swaps_file:
         for line in swaps_file:
             if drive in line:
@@ -166,21 +101,32 @@ def prepare_drive(drive):
                 log(f"Disabling swap on {swap_part}...")
                 run_command(["sudo", "swapoff", swap_part])
 
-def setup_kali_usb():
-    global DRIVE
-    log("Setting up Kali bootable USB...")
-    list_drives()
-    DRIVE = input("Enter the drive to use for Kali USB (e.g., /dev/sda) [Default: /dev/sda]: ") or "/dev/sda"
+    log(f"Checking for processes using {drive}...")
+    result = subprocess.run(["sudo", "lsof", drive], capture_output=True, text=True)
+    if result.stdout.strip():
+        log(f"Processes using {drive}:\n{result.stdout}")
+        kill = input(f"Do you want to kill these processes? (y/n) [Default: y]: ") or "y"
+        if kill.lower() == "y":
+            run_command(f"sudo fuser -k {drive}", shell=True)
+            log(f"Killed processes using {drive}.")
+        else:
+            log("Cannot proceed while processes are using the drive. Exiting.")
+            sys.exit(1)
+    else:
+        log(f"No processes are using {drive}.")
 
-    # Confirm the selected drive
+def setup_usb():
+    global DRIVE
+    log("Setting up bootable USB...")
+    list_drives()
+    DRIVE = input("Enter the drive to use for USB (e.g., /dev/sda) [Default: /dev/sda]: ") or "/dev/sda"
+
     confirm = input(f"You have selected {DRIVE}. Is this correct? (y/n) [Default: y]: ") or "y"
     if confirm.lower() != "y":
         log("Drive selection canceled. Exiting.")
         sys.exit(1)
 
     prepare_drive(DRIVE)
-
-    # Wipe drive if needed
     wipe = input(f"Do you want to wipe the drive {DRIVE} before starting? (y/n) [Default: n]: ") or "n"
     if wipe.lower() == "y":
         log(f"Wiping {DRIVE} and clearing any existing file system or encryption signatures...")
@@ -189,36 +135,40 @@ def setup_kali_usb():
         run_command(["sudo", "dd", "if=/dev/zero", f"of={DRIVE}", "bs=1M", "count=10"])
         log(f"{DRIVE} wiped successfully.")
 
-    # Get Kali ISO path if not already provided
     global KALI_ISO
-    if not KALI_ISO:
-        KALI_ISO = input("Enter the path to the Kali ISO file: ")
-    if not os.path.isfile(KALI_ISO):
-        log(f"Error: Kali ISO file not found at {KALI_ISO}")
+    if CREATE_KALI:
+        if not KALI_ISO:
+            KALI_ISO = input("Enter the path to the Kali ISO file: ")
+        if not os.path.isfile(KALI_ISO):
+            log(f"Error: Kali ISO file not found at {KALI_ISO}")
+            sys.exit(1)
+        ISO_PATH = KALI_ISO
+    else:
+        log("No OS selected for installation. Exiting.")
         sys.exit(1)
 
-    # Write the ISO to the USB drive
-    log(f"Writing Kali ISO to {DRIVE}...")
-    run_command(f"sudo dd if='{KALI_ISO}' of='{DRIVE}' bs=4M status=progress", shell=True, interactive=True)
-    log(f"Kali ISO written to {DRIVE} successfully.")
+    log(f"Writing ISO to {DRIVE}...")
+    run_command(f"sudo dd if='{ISO_PATH}' of='{DRIVE}' bs=64M status=progress", shell=True, interactive=True)
+    log(f"ISO written to {DRIVE} successfully.")
 
-    # Fix the partition table to reclaim remaining space
-    fix_partition_table()
+    if CREATE_KALI:
+        fix_partition_table()
+    else:
+        log("Only basic setup is performed. Exiting.")
+        sys.exit(1)
 
 def fix_partition_table():
     log("Fixing partition table to reclaim remaining space...")
 
-    # Delete partition 2 (created by the ISO)
-    run_command(f"sudo parted -s {DRIVE} rm 2", shell=True)
+    run_command(f"sudo parted -a optimal -s {DRIVE} rm 2", shell=True)
     log("Deleted partition 2.")
 
-    # Get the end of partition 1
     result = subprocess.run(["sudo", "parted", "-s", DRIVE, "unit", "MB", "print"], capture_output=True, text=True)
     end_of_p1 = None
     for line in result.stdout.strip().splitlines():
         if line.strip().startswith("1"):
             parts = line.strip().split()
-            end_of_p1 = parts[2]  # End of partition 1
+            end_of_p1 = parts[2]
             break
     if end_of_p1 is None:
         log("Error: Could not find end of partition 1.")
@@ -226,7 +176,11 @@ def fix_partition_table():
 
     log(f"End of partition 1: {end_of_p1}")
 
-    # Ask for the size of the persistence partition
+    result = subprocess.run(["lsblk", "-bn", "-o", "SIZE", DRIVE], capture_output=True, text=True)
+    sizes = result.stdout.strip().splitlines()
+    total_size_bytes = int(sizes[0].strip())
+    total_size_mb = total_size_bytes / (1024 * 1024)
+
     size_persistence = input("Enter size for persistence partition in GB (e.g., 4): ") or "4"
     try:
         size_persistence_gb = float(size_persistence)
@@ -234,54 +188,49 @@ def fix_partition_table():
         log("Invalid size entered for persistence partition. Exiting.")
         sys.exit(1)
 
-    # Calculate the end point of the persistence partition
     start_persistence_mb = float(end_of_p1.replace('MB', ''))
     end_persistence_mb = start_persistence_mb + (size_persistence_gb * 1024)
-    end_persistence = f"{end_persistence_mb}MB"
 
-    # Get the total size of the drive in MB
-    result = subprocess.run(["sudo", "parted", "-s", DRIVE, "unit", "MB", "print", "free"], capture_output=True, text=True)
-    total_size_mb = None
-    for line in result.stdout.strip().splitlines():
-        if "Disk" in line and "MB" in line:
-            total_size_mb = float(line.strip().split()[2].replace('MB', ''))
-            break
-    if total_size_mb is None:
-        log("Error: Could not determine total drive size.")
-        sys.exit(1)
-
-    # Ensure the end_persistence_mb does not exceed the total drive size
     if end_persistence_mb > total_size_mb:
         log("Error: Persistence partition size exceeds available space.")
         sys.exit(1)
 
-    # Create persistence partition (partition 2)
-    run_command(f"sudo parted -s {DRIVE} mkpart primary {start_persistence_mb}MB {end_persistence_mb}MB", shell=True)
+    run_command(f"sudo parted -a optimal -s {DRIVE} mkpart primary {start_persistence_mb}MB {end_persistence_mb}MB", shell=True)
     log("Created persistence partition.")
 
-    # If creating documents partition
-    if CREATE_DOCS:
-        # Documents partition starts where persistence partition ends
-        start_docs_mb = end_persistence_mb
-        end_docs = "100%"
+    start_docs_mb = end_persistence_mb
 
-        # Create documents partition (partition 3)
-        run_command(f"sudo parted -s {DRIVE} mkpart primary {start_docs_mb}MB {end_docs}", shell=True)
-        log("Created documents partition.")
+    size_docs = input("Enter size for documents partition in GB (leave blank to use remaining space minus 1GB): ")
+    if size_docs:
+        try:
+            size_docs_gb = float(size_docs)
+            end_docs_mb = start_docs_mb + (size_docs_gb * 1024)
+            if end_docs_mb > total_size_mb - 1024:
+                log("Error: Documents partition size exceeds available space when reserving 1GB for unencrypted partition.")
+                sys.exit(1)
+        except ValueError:
+            log("Invalid size entered for documents partition. Exiting.")
+            sys.exit(1)
+    else:
+        end_docs_mb = total_size_mb - 1024
+
+    run_command(f"sudo parted -a optimal -s {DRIVE} mkpart primary {start_docs_mb}MB {end_docs_mb}MB", shell=True)
+    log("Created documents partition.")
+
+    start_unencrypted_mb = end_docs_mb
+    run_command(f"sudo parted -a optimal -s {DRIVE} mkpart primary {start_unencrypted_mb}MB 100%", shell=True)
+    log("Created unencrypted partition for scripts/instructions.")
 
     run_command(f"sudo partprobe {DRIVE}", shell=True)
-    time.sleep(2)  # Wait for partitions to be recognized
+    time.sleep(2)
 
-    # Proceed to set up the persistence partition
     setup_kali_partition()
-
-    # Proceed to set up the documents partition if required
     if CREATE_DOCS:
         setup_docs_partition()
+    setup_unencrypted_partition()
 
 def setup_kali_partition():
     global DRIVE
-    # The persistence partition is partition 2
     PERSIST_PART = get_partition_name(DRIVE, 2)
 
     # Wipe existing signatures on the partition
@@ -290,7 +239,6 @@ def setup_kali_partition():
     log("Configuring encrypted persistence partition...")
 
     if FAST_MODE:
-        # Use faster, less secure encryption options
         luks_format_cmd = (
             f"sudo cryptsetup luksFormat '{PERSIST_PART}' "
             f"--type luks1 "
@@ -301,7 +249,6 @@ def setup_kali_partition():
         )
         mkfs_cmd = f"sudo mkfs.ext3 -L persistence /dev/mapper/kali_USB"
     else:
-        # Use stronger encryption options
         luks_format_cmd = (
             f"sudo cryptsetup luksFormat '{PERSIST_PART}' "
             f"--cipher aes-xts-plain64 "
@@ -311,13 +258,11 @@ def setup_kali_partition():
         )
         mkfs_cmd = f"sudo mkfs.ext4 -L persistence /dev/mapper/kali_USB"
 
-    # Perform encryption
     run_command(luks_format_cmd, shell=True, interactive=True)
-    time.sleep(2)  # Wait for the system to recognize the encrypted partition
+    time.sleep(2)
     run_command(f"sudo cryptsetup luksOpen '{PERSIST_PART}' kali_USB", shell=True, interactive=True)
     run_command(mkfs_cmd, shell=True)
 
-    # Create persistence.conf
     run_command("sudo mkdir -p /mnt/kali_USB", shell=True)
     run_command("sudo mount /dev/mapper/kali_USB /mnt/kali_USB", shell=True)
     run_command('echo "/ union" | sudo tee /mnt/kali_USB/persistence.conf', shell=True)
@@ -328,7 +273,6 @@ def setup_kali_partition():
 
 def setup_docs_partition():
     global DRIVE
-    # The documents partition is partition 3
     DOCS_PART = get_partition_name(DRIVE, 3)
 
     # Wipe existing signatures on the partition
@@ -337,7 +281,6 @@ def setup_docs_partition():
     log("Configuring VeraCrypt encryption for documents partition...")
 
     if FAST_MODE:
-        # Use faster, less secure encryption options
         veracrypt_create_cmd = (
             f"veracrypt --text --create '{DOCS_PART}' "
             f"--encryption AES "
@@ -345,38 +288,104 @@ def setup_docs_partition():
             f"--filesystem exfat "
             f"--volume-type normal "
             f"--quick "
-            # Removed '--size' parameter
         )
     else:
-        # Use stronger encryption options
         veracrypt_create_cmd = (
             f"veracrypt --text --create '{DOCS_PART}' "
             f"--encryption AES-Twofish-Serpent "
             f"--hash whirlpool "
             f"--filesystem exfat "
             f"--volume-type normal "
-            # Removed '--size' parameter
         )
 
-    # Create VeraCrypt volume
     run_command(veracrypt_create_cmd, shell=True, interactive=True)
-
     log("Encrypted documents partition setup complete.")
 
+def setup_unencrypted_partition():
+    global DRIVE
+    UNENCRYPTED_PART = get_partition_name(DRIVE, 4)
+
+    # Format the partition with FAT32
+    run_command(f"sudo mkfs.vfat -n 'TOOLS' {UNENCRYPTED_PART}", shell=True)
+    log("Formatted unencrypted partition with FAT32 filesystem.")
+
+    run_command("sudo mkdir -p /mnt/unencrypted", shell=True)
+    run_command(f"sudo mount {UNENCRYPTED_PART} /mnt/unencrypted", shell=True)
+
+    instructions = f"""
+To mount the encrypted partitions:
+
+**Persistence Partition (Kali only):**
+1. Open a terminal.
+2. Run: sudo cryptsetup luksOpen {get_partition_name(DRIVE, 2)} kali_persistence
+3. Mount: sudo mount /dev/mapper/kali_persistence /mnt/kali_persistence
+
+**Documents Partition:**
+1. Open a terminal.
+2. Run: sudo veracrypt --text --mount {get_partition_name(DRIVE, 3)} /mnt/veracrypt_docs
+
+**Automount Script:**
+You can use the provided script 'mount_encrypted_partitions.sh' to automate this process.
+
+Usage:
+sudo ./mount_encrypted_partitions.sh
+
+"""
+
+    # Write README.txt
+    with open("/tmp/README.txt", "w") as readme_file:
+        readme_file.write(instructions)
+    run_command("sudo cp /tmp/README.txt /mnt/unencrypted/README.txt", shell=True)
+    run_command("sudo rm /tmp/README.txt", shell=True)
+    log("Created README.txt with mounting instructions.")
+
+    mount_script = f"""#!/bin/bash
+# Script to mount encrypted partitions
+
+# Mount persistence partition (Kali only)
+if [ -b "{get_partition_name(DRIVE, 2)}" ]; then
+    echo "Opening and mounting encrypted persistence partition..."
+    sudo cryptsetup luksOpen {get_partition_name(DRIVE, 2)} kali_persistence
+    sudo mkdir -p /mnt/kali_persistence
+    sudo mount /dev/mapper/kali_persistence /mnt/kali_persistence
+    echo "Persistence partition mounted at /mnt/kali_persistence."
+fi
+
+# Mount documents partition
+if [ -b "{get_partition_name(DRIVE, 3)}" ]; then
+    echo "Mounting VeraCrypt documents partition..."
+    sudo mkdir -p /mnt/veracrypt_docs
+    sudo veracrypt --text --mount {get_partition_name(DRIVE, 3)} /mnt/veracrypt_docs
+    echo "Documents partition mounted at /mnt/veracrypt_docs."
+fi
+"""
+
+    # Write mount script
+    with open("/tmp/mount_encrypted_partitions.sh", "w") as script_file:
+        script_file.write(mount_script)
+    run_command("sudo cp /tmp/mount_encrypted_partitions.sh /mnt/unencrypted/mount_encrypted_partitions.sh", shell=True)
+    run_command("sudo chmod +x /mnt/unencrypted/mount_encrypted_partitions.sh", shell=True)
+    run_command("sudo rm /tmp/mount_encrypted_partitions.sh", shell=True)
+    log("Created mount_encrypted_partitions.sh script.")
+
+    run_command("sudo umount /mnt/unencrypted", shell=True)
+    log("Unencrypted partition setup complete.")
+
 def main():
-    global DEBUG, FAST_MODE, CREATE_KALI, CREATE_DOCS, KALI_ISO, DRIVE
+    global DEBUG, FAST_MODE, CREATE_KALI, CREATE_DOCS, CREATE_TAILS, KALI_ISO, TAILS_ISO, DRIVE
 
     parser = argparse.ArgumentParser(description="Covert SD Card Tool")
-    parser.add_argument("-a", "--all", action="store_true", help="Set up both Kali bootable USB and documents partition")
+    parser.add_argument("-a", "--all", action="store_true", help="Set up both OS bootable USB and documents partition")
     parser.add_argument("-k", "--kali", action="store_true", help="Create Kali bootable USB and persistence partition")
     parser.add_argument("-d", "--docs", action="store_true", help="Create encrypted documents partition")
-    parser.add_argument("-i", "--iso", help="Path to the Kali ISO file")
+    parser.add_argument("-t", "--tails", action="store_true", help="Create Tails bootable USB (no persistence)")
+    parser.add_argument("-i", "--iso", help="Path to the Kali or Tails ISO file")
     parser.add_argument("--fast", action="store_true", help="Enable fast setup with less secure encryption")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
 
     args = parser.parse_args()
 
-    if not any([args.all, args.kali, args.docs]):
+    if not any([args.all, args.kali, args.docs, args.tails]):
         parser.print_help()
         sys.exit(1)
 
@@ -388,25 +397,40 @@ def main():
     if FAST_MODE:
         log("Fast mode enabled: Using less secure encryption for quicker setup.")
 
-    CREATE_KALI = args.all or args.kali
-    CREATE_DOCS = args.all or args.docs
+    if args.all:
+        CREATE_DOCS = True
+        if args.tails:
+            CREATE_TAILS = True
+        else:
+            CREATE_KALI = True
+    else:
+        CREATE_KALI = args.kali
+        CREATE_DOCS = args.docs
+        CREATE_TAILS = args.tails
+
     if args.iso:
-        KALI_ISO = args.iso
+        if CREATE_KALI:
+            KALI_ISO = args.iso
+        elif CREATE_TAILS:
+            TAILS_ISO = args.iso
 
     check_dependencies()
 
-    if CREATE_KALI:
-        setup_kali_usb()
+    if CREATE_KALI or CREATE_TAILS:
+        setup_usb()
     else:
-        # If not creating Kali USB, we still need to set the DRIVE variable
         list_drives()
         DRIVE = input("Enter the drive to use (e.g., /dev/sda) [Default: /dev/sda]: ") or "/dev/sda"
         prepare_drive(DRIVE)
 
-        # If creating documents partition only
         if CREATE_DOCS:
-            fix_partition_table()
-            setup_docs_partition()
+            if CREATE_TAILS:
+                fix_partition_table_tails()
+            else:
+                fix_partition_table()
+                setup_docs_partition()
+        else:
+            setup_unencrypted_partition()
 
     log("Partition setup complete.")
 
